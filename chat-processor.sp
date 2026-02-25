@@ -5,17 +5,18 @@
 
 ////////////////////
 //Defines
-#define PLUGIN_NAME "Chat-Processor"
+#define PLUGIN_NAME "[ANY] Chat-Processor"
 #define PLUGIN_AUTHOR "Drixevel"
-#define PLUGIN_DESCRIPTION "Replacement for Simple Chat Processor."
-#define PLUGIN_VERSION "2.2.9"
+#define PLUGIN_DESCRIPTION "Replacement for Simple Chat Processor to help plugins access an easy API for chat modifications."
+#define PLUGIN_VERSION "2.3.0"
 #define PLUGIN_CONTACT "https://drixevel.dev/"
 
 ////////////////////
 //Includes
 #include <sourcemod>
 #include <chat-processor>
-#include <colorvariables>
+#include <clientmod>
+#include <clientmod/multicolors>
 
 ////////////////////
 //ConVars
@@ -47,6 +48,7 @@ Handle g_Forward_OnReloadChatData;
 
 ////////////////////
 //Globals
+EngineVersion game;
 bool g_Late;
 StringMap g_MessageFormats;
 bool g_Proto;
@@ -97,6 +99,7 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	g_Forward_OnSetChatColorPost = CreateGlobalForward("CP_OnSetChatColorPost", ET_Ignore, Param_Cell, Param_String);
 	g_Forward_OnReloadChatData = CreateGlobalForward("CP_OnReloadChatData", ET_Ignore);
 
+	game = GetEngineVersion();
 	g_Late = late;
 	
 	return APLRes_Success;
@@ -187,11 +190,11 @@ public Action OnSayText2(UserMsg msg_id, BfRead msg, const int[] players, int pl
 	switch (g_Proto)
 	{
 		case true: PbReadString(msg, "msg_name", sFlag, sizeof(sFlag));
-		case false: BfReadString(msg, sFlag, sizeof(sFlag));
+		case false: {
+			BfReadByte(msg);
+			BfReadString(msg, sFlag, sizeof(sFlag));
+		}
 	}
-	
-	//Удаляем \x01, \x02 и т.д. ☺
-	CleanMessageFlag(sFlag, sizeof(sFlag));
 	
 	//Trim the flag so there's no potential issues with retrieving the specified format rules.
 	TrimString(sFlag);
@@ -225,6 +228,17 @@ public Action OnSayText2(UserMsg msg_id, BfRead msg, const int[] players, int pl
 		case true: PbReadString(msg, "params", sMessage, sizeof(sMessage), 1);
 		case false: if (BfGetNumBytesLeft(msg)) BfReadString(msg, sMessage, sizeof(sMessage));
 	}
+	
+	if (strlen(sMessage) >= MAXLENGTH_MESSAGE - 1)
+	{
+		LogError("Сообщение слишком длинное от клиента %d: %d символов", author, strlen(sMessage));
+		
+		// Обрезать сообщение
+		sMessage[MAXLENGTH_MESSAGE - 1] = '\0';
+		
+		// Или вернуть ошибку
+		// return Plugin_Stop;
+	}
 
 	//Clients have the ability to color their chat if they manually type in color tags, this allows server operators to choose if they want their players the ability to do so.
 	//Example: {red}This {white}is {green}a {blue}random {yellow}message.
@@ -236,8 +250,8 @@ public Action OnSayText2(UserMsg msg_id, BfRead msg, const int[] players, int pl
 		
 		if (strlen(sFlags) == 0 || !CheckCommandAccess(author, "", ReadFlagString(sFlags), true))
 		{
-			CRemoveColors(sName, sizeof(sName));
-			CRemoveColors(sMessage, sizeof(sMessage));
+			C_RemoveTags(sName, sizeof(sName));
+			C_RemoveTags(sMessage, sizeof(sMessage));
 		}
 	}
 
@@ -321,10 +335,10 @@ public Action OnSayText2(UserMsg msg_id, BfRead msg, const int[] players, int pl
 	}
 
 	if (StrEqual(sNameCopy, sName))
-		Format(sName, sizeof(sName), "{teamcolor}%s", sName);
+		Format(sName, sizeof(sName), "\x03%s", sName);
 
 	if (StrEqual(sMessageCopy, sMessage))
-		Format(sMessage, sizeof(sMessage), "{default}%s", sMessage);
+		Format(sMessage, sizeof(sMessage), "\x01%s", sMessage);
 	
 	DataPack pack = new DataPack();
 	pack.WriteCell(author);
@@ -381,21 +395,19 @@ public void Frame_OnChatMessage(DataPack pack)
 
 	//Make sure that the text is default for the message if no colors are present.
 	if (iResults != Plugin_Changed && (!bProcessColors || bRemoveColors))
-		Format(sMessage, sizeof(sMessage), "{teamcolor}%s", sMessage);
+		Format(sMessage, sizeof(sMessage), "\x03%s", sMessage);
 
 	if (iResults == Plugin_Changed && bProcessColors)
-		Format(sMessage, sizeof(sMessage), "{default}%s", sMessage);
+		Format(sMessage, sizeof(sMessage), "\x01%s", sMessage);
 
 	//Replace the specific characters for the name and message strings.
 	ReplaceString(sBuffer, sizeof(sBuffer), "{1}", sName);
 	ReplaceString(sBuffer, sizeof(sBuffer), "{2}", sMessage);
-	ReplaceString(sBuffer, sizeof(sBuffer), "{3}", "{default}");
+	ReplaceString(sBuffer, sizeof(sBuffer), "{3}", "\x01");
 
-	//Process colors based on the final results we have.
-	if (iResults == Plugin_Changed && bProcessColors)
-	{
-		CProcessVariables(sBuffer, sizeof(sBuffer));
-	}
+	//Process colors based on the final results we have (CPrintToChatEx processes tags internally via clientmod).
+	if (iResults == Plugin_Changed && bProcessColors && game == Engine_CSGO)
+		Format(sBuffer, sizeof(sBuffer), " %s", sBuffer);
 
 	if (iResults != Plugin_Stop)
 	{
@@ -426,10 +438,7 @@ public void Frame_OnChatMessage(DataPack pack)
 				if (iResults == Plugin_Stop || iResults == Plugin_Handled)
 					continue;
 				
-				CVSetNextAuthor(author);
-				//CVPrintToChat(client, "%s", sTempBuffer);
-				MC_PrintToChatEx(client, author, "%s", sTempBuffer);
-				C_PrintToChatEx(client, author, "%s", sTempBuffer);
+				CPrintToChatEx(client, author, "%s", sTempBuffer);
 			}
 		}
 	}
@@ -502,8 +511,8 @@ public int Native_GetFlagFormatString(Handle plugin, int numParams)
 	g_MessageFormats.GetString(sFlag, sFormat, sizeof(sFormat));
 
 	SetNativeString(2, sFormat, GetNativeCell(3));
-	
-	return 0;
+
+	return 1;
 }
 
 ////////////////////
@@ -684,7 +693,7 @@ bool SetTagColor(int client, const char[] tag, const char[] color)
 		if (StrContains(sTag, tag, false) == -1)
 			continue;
 			
-		CRemoveColors(sTag, sizeof(sTag));
+		C_RemoveTags(sTag, sizeof(sTag));
 		Format(sTag, sizeof(sTag), "%s%s", color, sTag);
 		
 		g_Tags[client].SetString(i, sTag);
@@ -789,20 +798,4 @@ public Action CP_OnChatMessage(int& author, ArrayList recipients, char[] flagstr
 	}
 	
 	return changed ? Plugin_Changed : Plugin_Continue;
-}
-
-void CleanMessageFlag(char[] sFlag, int maxlength)
-{
-	int i = 0;
-	while (i < strlen(sFlag) && sFlag[i] < 0x20)
-	{
-		i++;
-	}
-	
-	if (i > 0)
-	{
-		strcopy(sFlag, maxlength, sFlag[i]);
-	}
-	
-	TrimString(sFlag);
 }
